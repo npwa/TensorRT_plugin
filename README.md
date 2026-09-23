@@ -3,7 +3,8 @@
 **Custom CUDA kernel + TensorRT plugin for quantized LLM inference** — a weight-only
 INT4 dequantize-and-GEMM kernel, wrapped as a TensorRT plugin, driven from a
 production-style C++ inference harness, benchmarked with the same rigorous
-parity-checking discipline as [`Evol_inference`](../Evol_inference).
+parity-checking discipline as
+[`Evol_inference`](https://github.com/npwa/Evol_inference/blob/main/README.md).
 
 **Status: planning complete, implementation not started.** See
 [`Doc/requirements.md`](Doc/requirements.md) for the scope and why this project exists
@@ -41,23 +42,3 @@ not they're flattering — but a different half of the stack.
 - **Stretch (selected): a minimal speculative-decoding harness** (small draft model +
   Phi-3 as target, accept/reject loop) — the cheapest of the three stretch options
   considered, since it needs no new CUDA work.
-
-## Effort estimate
-
-~4–7 weeks part-time for the core kernel/plugin/harness/benchmark work, +1–2 weeks for
-the speculative-decoding stretch. Full reasoning and risk ranking in
-[`Doc/implementation_plan.md`](Doc/implementation_plan.md).
-
-## Layout (planned)
-
-```
-Doc/                requirements.md, implementation_plan.md
-src/kernels/         the CUDA kernel(s)
-src/plugin/          TensorRT plugin wrapper
-src/harness/         C++ inference harness
-python/reference/    PyTorch reference implementation + benchmark scripts
-tests/               the parity ladder as an actual test suite
-```
-
-Not yet created — this is the planned layout from `Doc/implementation_plan.md`, filled
-in as each phase lands.

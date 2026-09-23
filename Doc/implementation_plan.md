@@ -105,6 +105,50 @@ total, `tests/`). Two things worth carrying forward:
    stated success criterion. Kernel optimization has no natural stopping point; the
    time-box is what prevents it from eating the rest of the schedule.
 
+**Phase 2 complete.** Shape: `gate_up_proj` (M=1, N=16384, K=3072), the largest of the
+four real Phi-3 layers, on the RTX 3080.
+
+- **Profiling (step 1)**: `ncu` on the naive kernel showed 86% of memory sectors wasted
+  to uncoalesced access (10.67 sectors/request against a 2-sector ideal for this access
+  pattern) and only 38% SM throughput — clearly memory-access-pattern-bound, not
+  compute-bound, so the optimization target was the load pattern, not more ALU work.
+- **Optimization (step 2)**: rewrote as a warp-per-output-row kernel
+  (`src/kernels/dequant_gemm_optimized.cu`) — activations staged once into shared
+  memory per output row, packed weights read via vectorized `uint32_t` loads (4 bytes /
+  8 weights per lane per iteration), partial sums combined with a warp-shuffle tree
+  reduction. Validated bit-for-bit consistent with the naive kernel's formula (8 tests,
+  `tests/test_dequant_gemm_optimized_kernel.py`, including a direct optimized-vs-naive
+  comparison), then re-profiled: sectors/request dropped from 10.67 to 1.60, SM
+  throughput rose from 38% to 81%. Benchmarked
+  (`src/kernels/bench_naive.cu`/`bench_optimized.cu`, median of 50 runs): **0.7058 ms
+  (naive) -> 0.1642 ms (optimized), a 4.3x speedup**, confirming the fix worked for the
+  diagnosed reason rather than coincidentally.
+- **cuBLAS baseline (step 3)**: the "obvious alternative" — unpack INT4 to a dense fp32
+  weight matrix (`src/kernels/dequant_only.cu`, deliberately unoptimized) and call
+  `cublasSgemv` — needed its own row-major-vs-column-major transpose derivation
+  (row-major `[N,K]` storage read as column-major `[K,N]` = `W^T`, so `CUBLAS_OP_T` with
+  `m=K, n=N, lda=K` recovers `W @ x`). Verified numerically against the optimized
+  kernel's output before trusting any timing (`src/kernels/bench_cublas_baseline.cu`;
+  `rel_err ~ 1e-6`, MATCH) — the project's standing "verify, don't assume" discipline
+  paying off a third time, this time by *confirming* rather than catching a bug.
+  Result: **0.7588 ms/call**, essentially tied with the naive fused kernel and **4.6x
+  slower than the optimized fused kernel**. The dense-dequant intermediate (16384 x
+  3072 x 4 bytes, ~201MB) round-trips through global memory once to be written and
+  again for cuBLAS to read, and that extra traffic outweighs whatever cuBLAS gains from
+  being a mature, tuned GEMM.
+- **Hard stop (step 4)**: reporting this as the final Phase 2 result per requirements.md
+  §6 — the fused optimized kernel beats both the naive fused kernel (4.3x) and the
+  dequantize-then-vendor-GEMM baseline (4.6x). No further optimization attempted;
+  moving on to Phase 3.
+- **Full-suite regression caught before commit**: adding `dequant_gemm_optimized` to
+  the shared `torch_binding.cpp` broke `test_dequant_gemm_naive_kernel.py`'s fixture,
+  which still only compiled `torch_binding.cpp` against `dequant_gemm_naive.cu` —
+  `launch_dequant_gemm_optimized` was an undefined symbol at link time. The optimized
+  kernel's own test file happened to compile both `.cu` files and so never caught it.
+  Fixed by adding `dequant_gemm_optimized.cu` to that fixture's sources too. A reminder
+  to run the full suite, not just the new test file, after changing a file shared
+  across test fixtures.
+
 ### Phase 3 — TensorRT Plugin
 1. Implement the plugin class decided in Phase 0 step 4, wrapping the Phase 2 kernel:
    output-shape inference, `configurePlugin`, `enqueue`, serialization of the group-size/
