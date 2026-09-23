@@ -313,6 +313,39 @@ throughout, no custom deleter needed.
   itself, is the dominant cost at this shape and batch size — the same finding, showing
   up a second time through an independent measurement path.
 
+### Phase 5B — Does the speedup survive a full end-to-end response?
+
+Added after the Phase 5 benchmark table and its presentation write-up prompted the
+obvious follow-up question: the ~9x per-op speedup was measured on one linear layer in
+isolation (one shape, batch of 2) — does that survive once it's one piece of a full,
+real, autoregressive chatbot response (prompt + many decode steps, all 32 layers,
+attention included)? Phase 5's own "Reading it honestly" note already flagged this as
+unmeasured; this phase measures it rather than leaving it a caveat.
+
+1. **Scope decision, stated explicitly rather than defaulted into**: test the
+   **standalone CUDA kernel substituted into a real, full Phi-3-mini generation loop at
+   the PyTorch level** (real tokenizer, real prompt, real stop condition) — not a new
+   TensorRT engine covering the whole model. Building attention and KV-cache as
+   TensorRT plugins for all 32 layers would be a multi-week undertaking already deferred
+   out of this project's scope (requirements.md §8 lists attention-kernel and
+   KV-cache-paging as separate, declined stretch options). The PyTorch-level
+   substitution answers the actual question — does the op-level win survive in a full
+   response — without that scope blow-up.
+2. Reuse `Evol_inference`'s existing per-layer module-substitution mechanism (already
+   proven there for swapping quantization precision layer-by-layer) to swap a thin
+   `nn.Module` wrapper around the JIT-compiled `dequant_gemm_optimized` kernel in for
+   each of the four real Phi-3 projection types, across all 32 layers.
+3. Measure real end-to-end generation latency — warmup + median-of-N, the same
+   methodology used throughout this project — for a fixed prompt and fixed decode
+   length, across three configurations: (a) full FP16 baseline, (b) INT4 via plain
+   PyTorch eager (today's slow path, included for context), (c) INT4 via the optimized
+   kernel substituted in. Compare the resulting end-to-end speedup of (c) over (b)
+   against the ~9x isolated per-op number from Phase 5's benchmark table.
+4. **Hard stop rule**: time-box this phase and report whatever fraction of the isolated
+   speedup survives end-to-end, honestly — most of it, a little of it, or none. This is
+   an open question being measured, not a result the project is trying to land at a
+   predetermined number.
+
 ### Phase 6 — Speculative decoding (selected stretch, requirements.md §8)
 1. Pick a draft model. Real constraint to resolve here, not before: it needs a
    tokenizer compatible with Phi-3's for the accept/reject comparison to work cleanly —
