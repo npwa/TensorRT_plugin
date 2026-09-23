@@ -218,6 +218,49 @@ TensorRT versions.
    `evol_inference.fitness.measure_latency_ms`, so the numbers are directly comparable
    in the final write-up.
 
+**Phase 4 complete.** `src/harness/engine_harness.{h,cpp}` (`EngineHarness`) loads a
+serialized engine plan, registers the plugin creator the deserializer needs to resolve
+the `DequantGemmInt4` layer inside it, and hands out `IExecutionContext`s. Confirmed
+Phase 0's destructor-API finding actually holds in working code, not just in the docs:
+plain `std::unique_ptr<IRuntime>`/`unique_ptr<ICudaEngine>`/`unique_ptr<IExecutionContext>`
+throughout, no custom deleter needed.
+
+- **Build-once-deploy-many-times pipeline**: `validate_plugin_engine.cpp` (Phase 3) now
+  takes an optional second argument and, only if its own PASS check succeeds, serializes
+  the validated engine to a `.plan` file. The harness never rebuilds the network — it
+  only ever loads bytes a validation step already vouched for, matching how a real
+  deployment separates the build step (slow, done once) from serving (fast, done many
+  times).
+- **Correctness pass (step 2)**: `src/harness/run_single.cpp` loads the plan, runs one
+  inference, diffs against the same `reference.bin` Phase 3 validated the in-process-built
+  engine against. PASS, rel_err ~1e-6 — confirms serialize/deserialize round-tripped the
+  plugin's baked-in weights correctly, not just that the in-process build path works.
+- **Concurrency (step 3)**: `src/harness/run_concurrent.cpp`. Each worker owns its own
+  `IExecutionContext`, `cudaStream_t`, and pinned host input/output buffers (`cudaMallocHost`
+  — plain pageable memory can't participate in true async H2D/D2H overlap); a shared
+  `ICudaEngine` is read-only and safe to hand out contexts from concurrently, but a single
+  context is not safe for concurrent `enqueue` calls, so each thread gets its own. Workers
+  submit their async H2D-copy/enqueue/async-D2H-copy sequence with no synchronization
+  between requests, only a final `sync()` after all are submitted — real overlap, not
+  "N threads calling the same function."
+- **Timing (step 4)**: warmup(3) + median-of-50, individually-synchronized runs, matching
+  both `evol_inference.fitness.measure_latency_ms`'s methodology and this project's own
+  `bench_naive.cu`/`bench_optimized.cu` convention. Measured (shape M=2, N=3072, K=3072,
+  the `o_proj` test vectors, on the RTX 3080):
+  - Single-stream baseline: **0.0768 ms/request** (median of 50).
+  - 4 concurrent streams x 50 requests: **17873.9 req/s** aggregate, a **1.37x** speedup
+    over the fully-serial single-stream throughput.
+  - 8 concurrent streams x 50 requests: **17633.7 req/s** aggregate, **1.35x** — no
+    further gain over 4 streams.
+  - **Honest read**: the overlap is real but small and saturates immediately. This
+    workload is a single GEMV-shaped op with a ~24KB input and ~24KB output per
+    request — H2D/D2H copy time is already a small fraction of the ~0.077ms round trip,
+    so there's little copy-vs-compute overlap left to exploit, and going from 4 to 8
+    streams gained nothing (likely fixed per-launch/scheduling overhead, not bandwidth or
+    SM occupancy, is now the limit). A larger per-request workload (e.g. batched decode
+    across many sequences) would likely show a bigger overlap benefit; not measured here
+    since it would require a different engine shape than the one already validated.
+
 ### Phase 5 — Parity + benchmarking write-up
 1. Turn requirements.md §6's three-level validation ladder (kernel → plugin → engine)
    into an actual test suite (`ctest`/a small Python test harness), not one-off manual

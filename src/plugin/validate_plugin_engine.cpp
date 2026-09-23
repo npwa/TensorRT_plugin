@@ -4,6 +4,7 @@
 // every earlier phase (naive kernel, optimized kernel) was already validated against, so
 // a match here confirms the plugin wrapping didn't change behavior, not just that it runs.
 #include "dequant_gemm_plugin.h"
+#include "trt_logger.h"
 
 #include <NvInfer.h>
 
@@ -21,15 +22,9 @@
 
 using namespace nvinfer1;
 using trt_quant_plugin::DequantGemmPluginCreator;
+using trt_quant_plugin::StderrLogger;
 
 namespace {
-
-class StderrLogger : public ILogger {
-public:
-    void log(Severity severity, const char* msg) noexcept override {
-        if (severity <= Severity::kWARNING) fprintf(stderr, "[TRT] %s\n", msg);
-    }
-};
 
 std::vector<char> readFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -84,6 +79,9 @@ Meta readMeta(const std::string& path) {
 
 int main(int argc, char** argv) {
     const std::string dir = argc > 1 ? argv[1] : "build/plugin_test_vectors";
+    // Phase 4 consumes this: a serialized engine plan it can load without rebuilding the
+    // network, mirroring a real build-once/deploy-many-times TensorRT workflow.
+    const std::string serialize_path = argc > 2 ? argv[2] : "";
     const Meta meta = readMeta(dir + "/meta.txt");
     printf("loaded test vectors: M=%ld N=%ld K=%ld group_size=%ld\n", (long)meta.M, (long)meta.N, (long)meta.K,
            (long)meta.group_size);
@@ -160,6 +158,12 @@ int main(int argc, char** argv) {
     const bool pass = max_abs_diff < 1e-3 + 1e-3 * max_ref;
     printf("engine vs Python reference: max_abs_diff=%.6f rel_err=%.6f -> %s\n", max_abs_diff, rel_err,
            pass ? "PASS" : "FAIL");
+
+    if (pass && !serialize_path.empty()) {
+        std::ofstream out_file(serialize_path, std::ios::binary);
+        out_file.write(static_cast<const char*>(serialized->data()), serialized->size());
+        printf("serialized validated engine to %s (%zu bytes)\n", serialize_path.c_str(), serialized->size());
+    }
 
     cudaStreamDestroy(stream);
     cudaFree(d_x);
