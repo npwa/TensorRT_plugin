@@ -148,11 +148,27 @@ Checked directly on the dev host rather than assumed, since this project's sibli
 
 ## 3. Open decisions carried forward (not resolved yet, by design)
 
-- TensorRT SDK acquisition path (pip vs. NVIDIA direct download) — Phase 0.
-- `IPluginV3` vs `IPluginV2DynamicExt` — Phase 0, once the installed version is known.
-- TensorRT object destruction API (`destroy()` vs `delete`) — Phase 0/4.
+- ~~TensorRT SDK acquisition path~~ — **resolved**: NVIDIA's public CUDA apt repo
+  (`developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64`) carries
+  `libnvinfer-dev` and friends with no login/EULA click-through needed — the anticipated
+  manual-download fallback wasn't necessary. Installed `libnvinfer11`,
+  `libnvinfer-plugin11`, `libnvinfer-dev`, `libnvinfer-headers-dev`,
+  `libnvinfer-headers-plugin-dev`, `libnvinfer-plugin-dev`, all pinned to
+  `11.3.0.99-1+cuda12.9` — the `+cuda12.9` build variant deliberately, to stay on the
+  single already-verified `nvcc` 12.0 toolchain rather than pulling in a separate CUDA
+  13.x toolkit just for TensorRT's linkage (the `+cuda13.4` variant apt initially
+  preferred was rejected for this reason). Exact version match with the
+  `tensorrt-cu13==11.3.0.99` pip wheel used for the Python side.
+- ~~`IPluginV3` vs `IPluginV2DynamicExt`~~ — **resolved**: TensorRT 11.3.0.99 has both;
+  targeting `IPluginV3` per the plan's stated preference.
+- ~~TensorRT object destruction API~~ — **resolved**: `IBuilder` and friends have plain
+  virtual destructors in this version (no legacy `->destroy()` pattern) — Phase 4's RAII
+  wrappers can use plain `std::unique_ptr`, no custom deleter needed.
 - Quantization group size (128 proposed, not fixed) — Phase 1.
 - Draft model for speculative decoding — Phase 6.
 
-Each of these is deferred deliberately — the pattern this whole project (and
-`Evol_inference` before it) follows is verify-then-decide, not guess-then-hope.
+Phase 0 is otherwise complete: `nvcc`-12.0-vs-driver-580 verified with a running kernel,
+`import tensorrt` verified (11.3.0.99), a minimal C++ program compiles/links/runs
+against the installed SDK (`nvinfer1::createInferBuilder` succeeds), and the CMake
+skeleton (`src/kernels`, `src/plugin`, `src/harness`, `tests`, all with placeholder
+`CMakeLists.txt` files) configures cleanly end to end.
