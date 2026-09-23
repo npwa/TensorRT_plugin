@@ -161,6 +161,45 @@ four real Phi-3 layers, on the RTX 3080.
    methodology already uses one fixed 2048-token workload; revisit only if a real need
    for dynamic shapes shows up later.
 
+**Phase 3 complete.** `src/plugin/dequant_gemm_plugin.{h,cpp}` implements
+`DequantGemmPluginV3` (`IPluginV3` + `IPluginV3OneCore`/`OneBuild`/`OneRuntime`, the
+"one object, three capability interfaces" pattern the installed TensorRT 11.3.0.99
+headers themselves define) and `DequantGemmPluginCreator` (`IPluginCreatorV3One`). Class
+names, method signatures and the capability-split design were read directly out of
+`/usr/include/x86_64-linux-gnu/NvInferRuntime.h` and `NvInferPluginBase.h` rather than
+recalled from memory, given the plan's own Phase 0 note that this API has shifted across
+TensorRT versions.
+
+- **Weight-only plugin contract**: the packed INT4 weights, per-group scales, `N`, `K`
+  and `group_size` are baked in as plugin attributes at network-build time (via
+  `PluginFieldCollection`), not runtime tensor inputs — the only runtime input is the
+  activation `x [M, K]`, the only output is `out [M, N]`. `enqueue()` is a thin call into
+  the Phase 2 optimized kernel; no new kernel code was written.
+- **Clone/serialization correctness**: `clone()` must produce an object whose
+  `getFieldsToSerialize()` pointers reference *its own* members, not the source object's
+  — a default-copy-constructor clone would leave the cloned `PluginFieldCollection`
+  pointing at the original's now-possibly-destroyed `N`/`K`/`group_size` ints. Solved
+  with a dedicated "cheap clone" constructor that shares the refcounted host/device
+  weight buffers (`shared_ptr`, no re-upload) but always rebuilds its own
+  `PluginFieldCollection` against its own members.
+- **CMake pitfall**: `dequant_kernels` (the kernel static lib) initially had
+  `CUDA_SEPARABLE_COMPILATION ON`, left over from assuming relocatable device code would
+  be needed. It isn't — nothing here calls a `__device__` function across translation
+  units — and turning it on broke the link of `validate_plugin_engine` (a pure-C++
+  executable) with an undefined `__cudaRegisterLinkedBinary` reference, since CMake
+  doesn't automatically add a device-link step for a plain executable consuming an
+  `-rdc=true` static lib. Fixed by turning it off.
+- **Validation (step 3)**: `python/reference/gen_plugin_test_vectors.py` generates
+  input/weight/reference tensors using the same already-validated
+  `quantize_groupwise_int4`/`quantized_linear_reference` functions every earlier phase
+  was checked against (not a second, independent C++ implementation of quantization —
+  the point is confirming the plugin wrapping preserves behavior, not re-deriving the
+  math). `src/plugin/validate_plugin_engine.cpp` builds a real single-layer engine via
+  the C++ builder API (`addPluginV3`), runs it, and diffs against those vectors. Passed
+  on two different real Phi-3 shapes/batch sizes (`o_proj`, M=2: rel_err ~1e-6;
+  `down_proj`, M=4: rel_err ~1e-6) — checked more than one shape deliberately, since a
+  single passing case could hide a bug that only shows up when `N != K` or `M` changes.
+
 ### Phase 4 — C++ inference harness
 1. CMake, C++20. RAII wrappers (custom-deleter smart pointers) for `IRuntime`,
    `ICudaEngine`, `IExecutionContext` — confirm in Phase 0 whether the installed
