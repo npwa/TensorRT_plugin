@@ -64,6 +64,33 @@ Checked directly on the dev host rather than assumed, since this project's sibli
    performance. Validate against the PyTorch reference on small synthetic shapes first
    (e.g. 32×32), then the real Phi-3 shapes from step 1.
 
+**Phase 1 complete.** Real shapes confirmed from the safetensors index, not the
+architecture doc (`python/reference/shapes.py`) -- all four projection types are
+bias-free, and every `in_features` divides evenly into 128-element groups. Scheme
+documented and implemented in `python/reference/quant.py` (groupwise symmetric INT4,
+group size 128, real 2-per-byte bit-packing). The naive kernel
+(`src/kernels/dequant_gemm_naive.cu`) matches the PyTorch reference to `rtol=1e-4`
+across small synthetic shapes, all four real Phi-3 shapes, and a batched case (18 tests
+total, `tests/`). Two things worth carrying forward:
+
+- **Tolerance calibration, not a bug**: the first test run used an arbitrary 5%
+  weight-reconstruction-error bound, written before any real data existed. Real
+  Phi-3 `down_proj` weights measured ~12% relative Frobenius error under this scheme
+  (no calibration, no outlier handling, no NF4-style non-uniform levels -- plain
+  symmetric INT4 really does lose this much). Corrected the test bound to 20%,
+  grounded in the measured number rather than a guess.
+- **Phase 5's Python kernel-benchmark wrapper got pulled forward**: validating the
+  kernel against the reference needed *some* way to call it from Python, so
+  `src/kernels/torch_binding.cpp` (a thin `torch.utils.cpp_extension` wrapper, JIT-compiled
+  via `torch.utils.cpp_extension.load`) exists now instead of in Phase 5. The pure
+  kernel (`dequant_gemm_naive.cu`/`.cuh`) has no torch dependency and never will --
+  Phase 3's plugin links it directly.
+- **Environment note**: `torch.utils.cpp_extension.load` needs `ninja` on `PATH`, not
+  just importable -- installed into `.venv`, but since this project's commands run via
+  `.venv/bin/python` directly rather than an activated venv, `PATH` needs
+  `.venv/bin` prepended explicitly when running anything that JIT-compiles
+  (`PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=. .venv/bin/python -m pytest tests/`).
+
 ### Phase 2 — Optimize (time-boxed)
 1. Profile the naive kernel with `ncu`; confirm whether it's memory- or compute-bound
    before optimizing blind (a batch-1 dequant+GEMM is very likely memory-bandwidth-bound
