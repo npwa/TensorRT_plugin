@@ -3,3 +3,7 @@ numpy
 pytest
 safetensors
 ninja
+transformers==5.17.0
+accelerate==1.15.0
+matplotlib
+scipy

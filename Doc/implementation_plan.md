@@ -346,6 +346,41 @@ unmeasured; this phase measures it rather than leaving it a caveat.
    an open question being measured, not a result the project is trying to land at a
    predetermined number.
 
+**Phase 5B complete.** `python/benchmarks/phase5b_modules.py` implements
+`EagerInt4Linear`/`KernelInt4Linear` (identical `quantize_groupwise_int4` weights,
+different compute path) and `substitute_all`/`restore_all` (module substitution across
+all 32 blocks' four projection types, mirroring `Evol_inference`'s `WeightBank.assemble`
+— quantize-then-free-the-fp16-original so the swap doesn't double peak VRAM).
+`python/benchmarks/phase5b_end_to_end.py` runs 18 real chat prompts (6 short / 6 medium
+/ 6 long, real tokenizer, real chat template) through `model.generate()` — full 32-layer
+Phi-3-mini, 64 forced decode tokens per prompt (`min_new_tokens == max_new_tokens`, so
+every configuration times equal decode work rather than an early-EOS-confounded
+response length) — across FP16, eager INT4, and kernel INT4.
+
+- **Real bug caught by the smoke test before the full run**: `EagerInt4Linear`'s first
+  version didn't cast its float32 output back to the model's fp16 dtype, which crashed
+  `lm_head` on the very first generate() call. A `--smoke` flag (2 prompts, 8 tokens)
+  exists specifically to catch exactly this class of mistake cheaply, before spending
+  the full run's time on it — caught it on the first smoke run, fixed, reran clean.
+- **Result: the isolated per-op speedup survives, closely** — mean end-to-end speedup
+  (kernel vs. eager, identical quantized weights, 18 prompts): **9.57x** (95% CI:
+  9.15x–9.99x), matching Phase 5's isolated single-op finding (~8.9x) almost exactly.
+  Chart: `build/phase5b/speedup_chart.png` (per-prompt speedup, grouped by complexity,
+  mean + 95% CI overlaid — regenerate via `python/benchmarks/phase5b_plot.py`).
+- **A real, honest nuance, not smoothed over**: speedup is consistently higher on
+  short/medium prompts (9.7x–10.4x) than long ones (7.6x–9.3x). Traced to the wrapper
+  modules' own design rather than the kernel itself: neither `EagerInt4Linear` nor
+  `KernelInt4Linear` caches a dequantized weight across calls, so every one of the 64
+  decode steps re-dequantizes fresh — a fixed, prompt-length-independent cost that
+  dominates eager's total time (measured latencies were flat at ~15.7s regardless of
+  prompt length, 10–66 tokens). The kernel's much cheaper per-call cost means prefill's
+  actually-M-dependent contribution is proportionally more visible in its total, so
+  longer prompts erode *relative* speedup somewhat — a real property of this
+  measurement's naive-recompute wrapper design, not evidence the kernel itself scales
+  poorly.
+- **Answering the original question**: yes, measured and confirmed rather than left a
+  caveat — the op-level win generalizes to a full, real, end-to-end chat response.
+
 ### Phase 6 — Speculative decoding (selected stretch, requirements.md §8)
 1. Pick a draft model. Real constraint to resolve here, not before: it needs a
    tokenizer compatible with Phi-3's for the accept/reject comparison to work cleanly —
