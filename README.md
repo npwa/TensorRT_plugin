@@ -6,9 +6,9 @@ production-style C++ inference harness, benchmarked with the same rigorous
 parity-checking discipline as
 [`Evol_inference`](https://github.com/npwa/Evol_inference/blob/main/README.md).
 
-**Status: Phases 0–5 complete** (environment, quantization scheme + naive kernel,
-optimized kernel, TensorRT plugin, C++ harness, validation + benchmarking). Phase 6
-(speculative decoding, stretch) not yet started. See
+**Status: Phases 0–6 complete** (environment, quantization scheme + naive kernel,
+optimized kernel, TensorRT plugin, C++ harness, validation + benchmarking, and the
+selected speculative-decoding stretch). See
 [`Doc/requirements.md`](Doc/requirements.md) for the scope and why this project exists
 as a standalone thing rather than an extension of `Evol_inference`, and
 [`Doc/implementation_plan.md`](Doc/implementation_plan.md) for the phase-by-phase build
@@ -100,12 +100,55 @@ algorithm-and-search story. This project is a different, complementary one:
 quantized layer fast (or doesn't), integrating it into a real inference-serving
 toolchain (TensorRT), and wrapping it in production-style C++.
 
-Same target model (Phi-3-mini-4k-instruct), same hardware (RTX 3080), same honest
+Same target model (Phi-3-mini-4k-instruct), same hardware (RTX 3080), same real
 benchmarking ethos — real numbers, real hardware disclosed, findings reported whether or
 not they're flattering — but a different half of the stack.
 
-## Not yet done
+## Stretch: speculative decoding (Phase 6)
 
-- **Speculative decoding (Phase 6, selected stretch)**: a minimal draft-model +
-  Phi-3-as-target accept/reject loop — the cheapest of the three stretch options
-  considered (requirements.md §8), since it needs no new CUDA work. Not started.
+Greedy speculative decoding (`TinyLlama-1.1B-Chat-v1.0` draft, Phi-3-mini target) —
+tokenizer compatibility with the target was empirically verified before picking the
+draft model (identical shared 32000-token Llama-2 vocabulary, confirmed with zero
+mismatches), and the implementation's output was independently checked byte-for-byte
+against plain greedy generation before any timing number was trusted.
+
+**Negative Result: this draft/target pairing is slower, not faster** — mean 0.26x (~3.8x
+slower) at the standard k=4 draft window. Root cause, measured directly rather than
+assumed: only a 9% draft acceptance rate, because TinyLlama and Phi-3-mini are
+independently-trained models that happen to share a tokenizer, not models from the same
+lineage — sharing a vocabulary turned out to be necessary for this to work at all, but
+far from sufficient for the draft's guesses to actually agree with the target's often
+enough to pay for themselves. See
+[`Doc/implementation_plan.md`](Doc/implementation_plan.md)'s Phase 6 section for the two
+real bugs the correctness check caught before this number could be trusted, and the full
+k=2 vs. k=4 comparison.
+
+## Adapting this to other models
+
+Not a blanket "easily portable" — it splits cleanly into a part that is and a part
+that isn't.
+
+**Portable with modest effort**: the kernel (`dequant_gemm_optimized`) and the
+quantization scheme (`quantize_groupwise_int4`) have no Phi-3-specific logic at all —
+they operate on any bias-free `[out_features, in_features]` weight matrix, from any
+model. The TensorRT plugin (`DequantGemmPluginV3`) is the same story: `N`/`K`/
+`group_size`/weights are just build-time attributes. The one place with real
+Phi-3-specific plumbing is the PyTorch-level module-substitution path
+(`python/benchmarks/phase5b_modules.py`), which hardcodes this model's attribute names
+(`self_attn.qkv_proj`, `mlp.gate_up_proj`, ...) and block count — porting to another
+dense-transformer architecture (Llama/Mistral-family models typically split `q_proj`/
+`k_proj`/`v_proj` instead of a fused `qkv_proj`) means updating those names to match,
+roughly an hour's work per new architecture, not a redesign.
+
+**Not easy — real, currently-missing engineering**: the plugin/engine only ever wraps
+**one linear layer in isolation**; there is no full-model TensorRT engine, since
+attention, RMSNorm, embeddings, and KV-cache don't exist as TensorRT ops here.
+Deploying a different model at scale through TensorRT would mean writing a new
+network-construction script chaining many plugin instances together for that model's
+full layer stack — mechanical, but real additional work. Every engine is also built for
+one **static shape** (Phase 3's explicit v1 scope decision), so varying request sizes in
+production would need dynamic-shape support that isn't built. Most importantly,
+attention and KV-cache as TensorRT ops were explicitly **deferred** in
+[`Doc/requirements.md`](Doc/requirements.md) §8 as separate, harder stretch goals — that
+gap, not the kernel or plugin code, is what actually stands between "this technique
+works" and "this is a deployable engine for a different model at production scale."

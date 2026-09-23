@@ -394,6 +394,65 @@ response length) — across FP16, eager INT4, and kernel INT4.
 4. Benchmark: tokens/sec with vs. without speculative decoding, same fixed-workload
    methodology as the rest of the project.
 
+**Phase 6 complete.**
+
+- **Draft model (step 1)**: candidates evaluated, not pre-committed, per the plan.
+  `TinyLlama-1.1B-Chat-v1.0` selected and *empirically* verified — not assumed —
+  tokenizer-compatible with Phi-3-mini: both use the same base Llama-2 SentencePiece
+  vocabulary (32000 tokens), confirmed with zero mismatches across every shared token
+  string and byte-identical token ids when encoding real text. Phi-3 adds 11 extra
+  special formatting tokens beyond that shared base (ids >= 32000) that TinyLlama's
+  smaller embedding table can't index — a real crash hit in early testing (see below),
+  not merely a theoretical edge case.
+- **Algorithm (step 2)**: `python/speculative/spec_decode.py` implements the greedy
+  (deterministic) special case of speculative decoding — matching this project's
+  `do_sample=False` convention throughout, Phase 5B included. This restriction gives a
+  hard, checkable correctness property: output is mathematically required to be
+  byte-identical to plain greedy decoding from the target alone, since every emitted
+  token is always the target's own greedy pick (confirmed via the draft, or substituted
+  directly when the draft was wrong). Both models' KV caches are carried incrementally
+  across rounds (cropped on rejection via `Cache.crop()`), not recomputed from scratch
+  each round — needed for the tokens/sec comparison to be fair rather than artificially
+  handicapped by O(n²) reprocessing.
+- **Two real bugs caught by the correctness check before any benchmark number was
+  trusted** (`python/speculative/verify_correctness.py`, output diffed byte-for-byte
+  against plain generation):
+  1. Feeding Phi-3's own out-of-vocabulary special tokens into the draft model's
+     embedding lookup crashed with a CUDA device-side assert. Fixed by clamping any
+     token id the draft can't index to 0 before feeding it in — safe because the draft
+     is only ever a source of guesses independently checked against the target's real
+     predictions, so a clamped id can only make the *next guess* worse, never the
+     returned output wrong.
+  2. A logic bug, not just a range issue: the draft-phase loop was re-feeding
+     `generated[:, -1:]` (the sequence's last token, already covered by the cache) as
+     if it were a fresh token to draft from, instead of carrying forward the draft's
+     own next-token prediction the same way `target_next_logits` was already correctly
+     carried for the target. Separately, the final round could overshoot
+     `max_new_tokens` by exactly one (the guaranteed correction/bonus token pushing
+     past budget when the last round's draft was fully accepted). Both fixed; all
+     three correctness-check prompts then matched plain generation exactly.
+- **Benchmark (step 4)**: `python/speculative/benchmark.py`, 6 prompts (2 short / 2
+  medium / 2 long, drawn from Phase 5B's same 18 for continuity), 64 forced decode
+  tokens, warmup + per-prompt timing. Both models resident simultaneously leaves very
+  little VRAM headroom on this GPU (peak ~9.9GB of ~9.86GB free), which is why this
+  benchmark uses 6 prompts rather than Phase 5B's full 18.
+
+  **Result: speculative decoding is slower here, not faster** — mean 0.26x (i.e., ~3.8x
+  slower) at k=4, improving to 0.33x at k=2 (still net negative) tried as a follow-up.
+  Root cause, measured directly: mean draft acceptance rate is only 9% (k=4) / 17%
+  (k=2) — TinyLlama's greedy predictions rarely agree with Phi-3-mini's, so most rounds
+  produce only the guaranteed correction token and none of the drafted ones, meaning
+  the draft model's own forward passes plus the batched-verification overhead are paid
+  for with little benefit. This is a legitimate, reportable outcome, not a failure of
+  the implementation — correctness was independently verified before any timing was
+  trusted, so the slowdown is a real property of this draft/target pairing, not a bug.
+  Tokenizer compatibility (the constraint the plan flagged) turned out to be necessary
+  but not sufficient: the two models being different lineages, trained independently by
+  different teams on different data, means their predicted distributions rarely align
+  closely enough at the same position for speculative decoding to pay off, even sharing
+  a vocabulary exactly. A draft model genuinely distilled from or co-trained with Phi-3
+  (unavailable here) would very likely see substantially higher acceptance.
+
 ## 2. Packages / tooling
 
 - **CUDA**: `nvcc` 12.0.140 (already installed; Phase 0 step 2 confirms it against the
