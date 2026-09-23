@@ -273,6 +273,46 @@ throughout, no custom deleter needed.
 4. README write-up in `Evol_inference`'s voice: real numbers, real hardware disclosed,
    findings reported whether or not they're flattering.
 
+**Phase 5 complete.**
+
+- **Validation ladder (step 1)**: `tests/CMakeLists.txt` wires the plugin-level and
+  engine-level rungs into real `ctest` cases (`gen_test_vectors` → `plugin_level_validation`
+  → `engine_level_validation`, ordered via ctest fixtures since each depends on the last
+  one's output — a shared vectors directory, then a serialized engine plan). All three
+  pass. The kernel-level rung is deliberately left as the existing pytest suite rather
+  than duplicated into ctest — it already needs the project venv's torch, and adding a
+  second test runner for the same coverage would be process for its own sake, not more
+  rigor.
+- **pybind11 exposure (step 2)**: already satisfied, not new work — `src/kernels/torch_binding.cpp`
+  (written in Phase 1, when the kernel first needed a way to be called from Python for
+  testing) already exposes the standalone kernel via pybind11 under the hood of
+  `torch.utils.cpp_extension.load`. No second wrapper was written.
+- **Benchmark table (step 3)**: `python/benchmarks/benchmark_table.py`. All four rows run
+  the identical weights and input (the same `build/plugin_test_vectors` the TensorRT
+  engine was validated against, loaded directly rather than regenerated), and use the
+  same warmup(3) + median-of-50 methodology throughout; the fourth row shells out to the
+  already-built `run_concurrent` harness binary rather than re-implementing TensorRT
+  invocation in Python, so there's one source of truth for that number, not two that
+  could drift. Measured (shape M=2, N=3072, K=3072, group_size=128, RTX 3080):
+
+  | Implementation | ms/request |
+  |---|---|
+  | PyTorch eager | 0.6778 |
+  | `torch.compile` | 0.1647 |
+  | Standalone CUDA kernel | 0.0759 |
+  | TensorRT plugin engine (C++ harness) | 0.0768 |
+
+  **Reading it honestly**: the TensorRT engine essentially ties the standalone kernel
+  (within run-to-run noise) — confirming the plugin wrapping adds no measurable
+  overhead, which is the result a thin wrapper *should* produce, not a given until
+  measured. `torch.compile` gets partway there (4.1x over eager) by fusing the
+  dequantize+matmul into fewer kernel launches, but doesn't reach the hand-written
+  kernel's coalesced-access pattern. PyTorch eager is slowest for the same reason the
+  cuBLAS baseline was in Phase 2: materializing a dense dequantized weight matrix in
+  global memory before the matmul, rather than fusing dequantization into the GEMM
+  itself, is the dominant cost at this shape and batch size — the same finding, showing
+  up a second time through an independent measurement path.
+
 ### Phase 6 — Speculative decoding (selected stretch, requirements.md §8)
 1. Pick a draft model. Real constraint to resolve here, not before: it needs a
    tokenizer compatible with Phi-3's for the accept/reject comparison to work cleanly —
